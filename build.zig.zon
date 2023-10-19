@@ -5,8 +5,8 @@
     .dependencies = .{
         // linux-only dependencies
 
-        .@"awslabs/aws-lc" = .{
-            .url = "https://github.com/awslabs/aws-lc/archive/refs/tags/v1.16.0.tar.gz",
+        .@"aws/aws-lc" = .{
+            .url = "https://github.com/aws/aws-lc/archive/refs/tags/v1.16.0.tar.gz",
             .hash = "12201f9087b8c955661c0b3869e69b3de58eb0c25fb2b0e227bbeda16923e1181104",
         },
         .@"aws/s2n-tls" = .{

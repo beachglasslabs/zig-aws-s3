@@ -1,214 +1,215 @@
 const std = @import("std");
 const Build = std.Build;
 
+pub fn awsIncludeDir(
+    zig_aws_s3_dep: *Build.Dependency,
+) Build.LazyPath {
+    const b = zig_aws_s3_dep.builder;
+    const prefix = zig_aws_s3_dep.module(module_hack_name).source_file;
+    return relativeLazyPath(b, prefix, "include");
+}
+pub fn linkAwsLibs(
+    comp: *Build.Step.Compile,
+    zig_aws_s3_dep: *Build.Dependency,
+) void {
+    const b = zig_aws_s3_dep.builder;
+    const prefix = zig_aws_s3_dep.module(module_hack_name).source_file;
+    for (aws_libs_names) |libname| {
+        switch (comp.target.getOsTag()) {
+            .linux => {},
+            else => {
+                if (std.mem.eql(u8, libname, "crypto") or
+                    std.mem.eql(u8, libname, "s2n") or
+                    std.mem.eql(u8, libname, "ssl"))
+                    continue;
+            },
+        }
+        comp.addObjectFile(relativeLazyPath(b, prefix, b.fmt("lib" ++ std.fs.path.sep_str ++ "lib{s}.a", .{libname})));
+    }
+}
+
+comptime {
+    _ = &awsIncludeDir;
+    _ = &linkAwsLibs;
+}
+
+const module_hack_name = blk: {
+    // zig fmt: off
+    const file = struct { fn file() []const u8 { return @src().file; } }.file();
+    // zig fmt: on
+
+    const SipHash = std.hash.SipHash128(1, 2);
+    var hasher = SipHash.init(&[_]u8{0xAB} ** SipHash.key_length);
+    const file_bytes = @embedFile(file);
+
+    @setEvalBranchQuota(file_bytes.len * 1000);
+    hasher.update(file_bytes);
+
+    break :blk &std.fmt.bytesToHex(hasher.finalResult(), .lower);
+};
+
+const aws_libs_names = [_][]const u8{
+    "aws-c-auth",
+    "aws-c-cal",
+    "aws-c-common",
+    "aws-c-compression",
+    "aws-checksums",
+    "aws-c-http",
+    "aws-c-io",
+    "aws-c-s3",
+    "aws-c-sdkutils",
+    "crypto",
+    "s2n",
+    "ssl",
+};
+
 pub fn build(b: *Build) void {
-    // # build options
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const cmake_exe_path = b.option([]const u8, "cmake_exe", "Specifies the CMake executable to invoke for build");
 
-    // # dependencies
-    const aws_deps: std.enums.EnumFieldStruct(AwsDepId, *Build.Dependency, null) = .{
-        // linux-only
-        .lc = b.dependency("awslabs/aws-lc", .{}),
-        .s2n_tls = b.dependency("aws/s2n-tls", .{}),
+    // linux-only
 
-        // remaining
-        .c_common = b.dependency("awslabs/aws-c-common", .{}),
-        .checksums = b.dependency("awslabs/aws-checksums", .{}),
-        .c_cal = b.dependency("awslabs/aws-c-cal", .{}),
-        .c_io = b.dependency("awslabs/aws-c-io", .{}),
-        .c_compression = b.dependency("awslabs/aws-c-compression", .{}),
-        .c_http = b.dependency("awslabs/aws-c-http", .{}),
-        .c_sdkutils = b.dependency("awslabs/aws-c-sdkutils", .{}),
-        .c_auth = b.dependency("awslabs/aws-c-auth", .{}),
+    const lc_dep = b.dependency("aws/aws-lc", .{});
+    const s2n_tls_dep = b.dependency("aws/s2n-tls", .{});
 
-        // the main dependency
-        .c_s3 = b.dependency("awslabs/aws-c-s3", .{}),
-    };
+    // remaining
 
-    // # everything else
+    const c_common_dep = b.dependency("awslabs/aws-c-common", .{});
+    const checksums_dep = b.dependency("awslabs/aws-checksums", .{});
+    const c_cal_dep = b.dependency("awslabs/aws-c-cal", .{});
+    const c_io_dep = b.dependency("awslabs/aws-c-io", .{});
+    const c_compression_dep = b.dependency("awslabs/aws-c-compression", .{});
+    const c_http_dep = b.dependency("awslabs/aws-c-http", .{});
+    const c_sdkutils_dep = b.dependency("awslabs/aws-c-sdkutils", .{});
+    const c_auth_dep = b.dependency("awslabs/aws-c-auth", .{});
 
-    const cmake_install_dir: Build.LazyPath = cmake: {
+    // the main dependency
+
+    const c_s3_dep = b.dependency("awslabs/aws-c-s3", .{});
+
+    const aws_cmake_install_dir: Build.LazyPath = cmake: {
         const exe_path = cmake_exe_path orelse {
             const poison_dir = b.allocator.create(Build.GeneratedFile) catch |e| @panic(@errorName(e));
             poison_dir.* = .{ .step = failureStep(b, error.CmakeExePathUnspecified, "Must specify cmake_exe to use CMake build") };
             break :cmake .{ .generated = poison_dir };
         };
-        const opt = CmakeOptimize.from(optimize);
 
-        const prev: ?*CmakeBuildStep = switch (target.getOsTag()) {
-            .linux => blk: {
-                // zig fmt: off
-                const lc      = cmakeBuildStep(b, "lc",      exe_path, opt, aws_deps.lc.path(""),      null);
-                const s2n_tls = cmakeBuildStep(b, "s2n_tls", exe_path, opt, aws_deps.s2n_tls.path(""), lc.installPrefix());
-                // zig fmt: on
-                break :blk s2n_tls;
+        const aws_cmake_step = AwsCMakeStep.create(
+            b,
+            exe_path,
+            target.getOsTag(),
+            AwsCMakeStep.Optimize.from(optimize),
+            .{
+                .lc = lc_dep.path(""),
+                .s2n_tls = s2n_tls_dep.path(""),
+
+                .c_common = c_common_dep.path(""),
+                .checksums = checksums_dep.path(""),
+                .c_cal = c_cal_dep.path(""),
+                .c_io = c_io_dep.path(""),
+                .c_compression = c_compression_dep.path(""),
+                .c_http = c_http_dep.path(""),
+                .c_sdkutils = c_sdkutils_dep.path(""),
+                .c_auth = c_auth_dep.path(""),
+
+                .c_s3 = c_s3_dep.path(""),
             },
-            else => null,
-        };
-
-        // zig fmt: off
-        const c_common      = cmakeBuildStep(b, "c_common",      exe_path, opt, aws_deps.c_common.path(""),      if (prev) |cbs| cbs.installPrefix() else null);
-        const checksums     = cmakeBuildStep(b, "checksums",     exe_path, opt, aws_deps.checksums.path(""),     c_common.installPrefix());
-        const c_cal         = cmakeBuildStep(b, "c_cal",         exe_path, opt, aws_deps.c_cal.path(""),         checksums.installPrefix());
-        const c_io          = cmakeBuildStep(b, "c_io",          exe_path, opt, aws_deps.c_io.path(""),          c_cal.installPrefix());
-        const c_compression = cmakeBuildStep(b, "c_compression", exe_path, opt, aws_deps.c_compression.path(""), c_io.installPrefix());
-        const c_http        = cmakeBuildStep(b, "c_http",        exe_path, opt, aws_deps.c_http.path(""),        c_compression.installPrefix());
-        const c_sdkutils    = cmakeBuildStep(b, "c_sdkutils",    exe_path, opt, aws_deps.c_sdkutils.path(""),    c_http.installPrefix());
-        const c_auth        = cmakeBuildStep(b, "c_auth",        exe_path, opt, aws_deps.c_auth.path(""),        c_sdkutils.installPrefix());
-
-        const c_s3          = cmakeBuildStep(b, "c_s3",          exe_path, opt, aws_deps.c_s3.path(""),          c_auth.installPrefix());
-        // zig fmt: on
-
-        break :cmake c_s3.installPrefix();
+        );
+        break :cmake aws_cmake_step.installPrefix();
     };
-
-    const proxy_artifact = b.addStaticLibrary(.{
-        .name = "lib",
-        .target = target,
-        .optimize = optimize,
-    });
-    b.installArtifact(proxy_artifact);
-
-    proxy_artifact.installHeadersDirectoryOptions(.{
-        .source_dir = relativeLazyPath(b, cmake_install_dir, "include"),
-        .install_dir = .header,
-        .install_subdir = "",
-    });
-    proxy_artifact.addLibraryPath(relativeLazyPath(b, cmake_install_dir, "lib"));
-    for (&[_][]const u8{
-        "aws-c-auth",
-        "aws-c-cal",
-        "aws-c-common",
-        "aws-c-compression",
-        "aws-checksums",
-        "aws-c-http",
-        "aws-c-io",
-        "aws-c-s3",
-        "aws-c-sdkutils",
-        "crypto",
-        "s2n",
-        "ssl",
-    }) |libname| proxy_artifact.linkSystemLibrary2(libname, .{ .needed = true, .use_pkg_config = .no, .preferred_link_mode = .Static });
+    _ = b.addModule(module_hack_name, .{ .source_file = aws_cmake_install_dir });
 }
 
-const AwsDepId = enum {
-    // linux-only
-    lc,
-    s2n_tls,
-
-    // remaining
-    c_common,
-    checksums,
-    c_cal,
-    c_io,
-    c_compression,
-    c_http,
-    c_sdkutils,
-    c_auth,
-
-    // the mainendency
-    c_s3,
-};
-
-const CmakeOptimize = enum {
-    Debug,
-    MinSizeRel,
-    Release,
-    RelWithDebInfo,
-
-    inline fn from(optimize: std.builtin.Mode) CmakeOptimize {
-        return switch (optimize) {
-            .Debug => .Debug,
-            .ReleaseSmall => .MinSizeRel,
-            .ReleaseFast => .Release,
-            .ReleaseSafe => .RelWithDebInfo,
-        };
-    }
-};
-
-fn cmakeBuildStep(
-    b: *Build,
-    name: []const u8,
-    cmake_exe: []const u8,
-    optimize: CmakeOptimize,
-    source: Build.LazyPath,
-    prefix: ?Build.LazyPath,
-) *CmakeBuildStep {
-    return CmakeBuildStep.create(.{
-        .builder = b,
-        .name = name,
-        .cmake_exe = cmake_exe,
-        .optimize = optimize,
-        .source = source,
-        .prefix = prefix,
-    });
-}
-
-const CmakeBuildStep = struct {
+pub const AwsCMakeStep = struct {
     step: Build.Step,
+    generated_install: Build.GeneratedFile,
+
     cmake_exe: []const u8,
-    source: Build.LazyPath,
-    optimize: CmakeOptimize,
-    existing_prefix: ?Build.LazyPath,
-    /// If `existing_prefix` is non-null, this field
-    /// mirrors it, but with this step as an intermediate
-    /// dependency instead.
-    generated_prefix: Build.GeneratedFile,
+    os_tag: std.Target.Os.Tag,
+    optimize: Optimize,
+    source_dirs: SourceDirs,
 
     pub const id: Build.Step.Id = .custom;
 
-    pub const CreateOptions = struct {
-        builder: *Build,
-        name: []const u8,
-        /// Path to the cmake executable to be invoked.
+    pub fn create(
+        b: *Build,
         cmake_exe: []const u8,
-        /// The `-DCMAKE_BUILD_TYPE` value.
-        optimize: CmakeOptimize,
-        /// The source directory that will be passed to `-S`.
-        source: Build.LazyPath,
-        /// If null, a new install prefix will be generated.
-        /// If non-null, will be used as the install prefix.
-        /// When this step is dependent on another `CmakeconfigAndInstallStep`,
-        /// this should be the `installPrefix()` of said step.
-        prefix: ?Build.LazyPath,
-    };
-
-    pub fn create(options: CreateOptions) *CmakeBuildStep {
-        const b = options.builder;
-        const self = b.allocator.create(CmakeBuildStep) catch |e| @panic(@errorName(e));
+        os_tag: std.Target.Os.Tag,
+        optimize: Optimize,
+        source_dirs: SourceDirs,
+    ) *AwsCMakeStep {
+        const self = b.allocator.create(AwsCMakeStep) catch |e| @panic(@errorName(e));
         self.* = .{
             .step = Build.Step.init(.{
-                .id = CmakeBuildStep.id,
-                .name = b.fmt("CMake ({s})", .{options.name}),
+                .id = AwsCMakeStep.id,
+                .name = b.fmt("Build AWS {s} with {s} for {s}", .{ @tagName(optimize), cmake_exe, @tagName(os_tag) }),
                 .owner = b,
-                .makeFn = CmakeBuildStep.make,
+                .makeFn = AwsCMakeStep.make,
             }),
-            .cmake_exe = b.dupe(options.cmake_exe),
-            .source = options.source,
-            .optimize = options.optimize,
-            .existing_prefix = options.prefix,
-            .generated_prefix = .{ .step = &self.step },
+            .generated_install = .{ .step = &self.step },
+
+            .cmake_exe = b.dupe(cmake_exe),
+            .os_tag = os_tag,
+            .optimize = optimize,
+            .source_dirs = source_dirs,
         };
-        self.source.addStepDependencies(&self.step);
-        if (self.existing_prefix) |prefix| {
-            prefix.addStepDependencies(&self.step);
-        }
         return self;
     }
 
-    pub fn installPrefix(self: *CmakeBuildStep) Build.LazyPath {
-        return .{ .generated = &self.generated_prefix };
+    pub fn installPrefix(self: *AwsCMakeStep) Build.LazyPath {
+        return .{ .generated = &self.generated_install };
+    }
+
+    pub const SourceDirs = std.enums.EnumFieldStruct(DepId, Build.LazyPath, null);
+    const DepId = enum {
+        // linux-only
+        lc,
+        s2n_tls,
+
+        // remaining
+        c_common,
+        checksums,
+        c_cal,
+        c_io,
+        c_compression,
+        c_http,
+        c_sdkutils,
+        c_auth,
+
+        // the mainendency
+        c_s3,
+    };
+    pub const Optimize = enum {
+        Debug,
+        MinSizeRel,
+        Release,
+        RelWithDebInfo,
+
+        pub inline fn from(optimize: std.builtin.Mode) Optimize {
+            return switch (optimize) {
+                .Debug => .Debug,
+                .ReleaseSmall => .MinSizeRel,
+                .ReleaseFast => .Release,
+                .ReleaseSafe => .RelWithDebInfo,
+            };
+        }
+    };
+
+    fn mustSkip(self: *AwsCMakeStep, dep: DepId) bool {
+        return switch (dep) {
+            .lc, .s2n_tls => switch (self.os_tag) {
+                else => true,
+                .linux => false,
+            },
+            else => false,
+        };
     }
 
     fn make(step: *Build.Step, prog: *std.Progress.Node) anyerror!void {
         _ = prog;
-
-        const self = @fieldParentPtr(CmakeBuildStep, "step", step);
+        const self = @fieldParentPtr(AwsCMakeStep, "step", step);
         const b = step.owner;
-
-        const source_path = self.source.getPath2(b, step);
 
         var man = b.cache.obtain();
         defer man.deinit();
@@ -216,7 +217,12 @@ const CmakeBuildStep = struct {
         man.hash.addBytes(self.cmake_exe);
         man.hash.addBytes(std.mem.asBytes(&self.optimize));
 
-        {
+        inline for (@typeInfo(DepId).Enum.fields) |field| skip: {
+            const dep_id: DepId = @field(DepId, field.name);
+            if (self.mustSkip(dep_id)) break :skip;
+
+            const source_path = Build.LazyPath.getPath2(@field(self.source_dirs, field.name), b, step);
+
             var path_list = std.ArrayList([]const u8).init(b.allocator);
             defer path_list.deinit();
 
@@ -236,13 +242,46 @@ const CmakeBuildStep = struct {
                 const basename = std.fs.path.basename(entry.path);
                 std.debug.assert(std.mem.eql(u8, basename, entry.basename));
 
-                if (dirname != null and
-                    !std.mem.startsWith(u8, dirname.?, "source") and
-                    !std.mem.startsWith(u8, dirname.?, "include") //
-                ) continue;
-                if (!std.mem.eql(u8, ext, ".c") and
-                    !std.mem.eql(u8, basename, "CMakeLists.txt") //
-                ) continue;
+                switch (dep_id) {
+                    .lc => {
+                        if (dirname != null and
+                            !std.mem.startsWith(u8, dirname.?, "include") and
+                            !std.mem.startsWith(u8, dirname.?, "ssl") and
+                            !std.mem.startsWith(u8, dirname.?, "crypto") and
+                            !std.mem.startsWith(u8, dirname.?, "generated-src") //
+                        ) continue;
+                        if (!std.mem.eql(u8, ext, ".c") and
+                            !std.mem.eql(u8, ext, ".h") and
+                            !std.mem.eql(u8, ext, ".s") and
+                            !std.mem.eql(u8, ext, ".S") and
+                            !std.mem.eql(u8, basename, "CMakeLists.txt") //
+                        ) continue;
+                    },
+                    .s2n_tls => {
+                        if (dirname != null and
+                            !std.mem.startsWith(u8, dirname.?, "api") and
+                            !std.mem.startsWith(u8, dirname.?, "crypto") and
+                            !std.mem.startsWith(u8, dirname.?, "stuffer") and
+                            !std.mem.startsWith(u8, dirname.?, "tls") and
+                            !std.mem.startsWith(u8, dirname.?, "pq-crypto") and
+                            !std.mem.startsWith(u8, dirname.?, "utils") //
+                        ) continue;
+                        if (!std.mem.eql(u8, ext, ".c") and
+                            !std.mem.eql(u8, ext, ".h") and
+                            !std.mem.eql(u8, basename, "CMakeLists.txt") //
+                        ) continue;
+                    },
+                    else => {
+                        if (dirname != null and
+                            !std.mem.startsWith(u8, dirname.?, "source") and
+                            !std.mem.startsWith(u8, dirname.?, "include") //
+                        ) continue;
+                        if (!std.mem.eql(u8, ext, ".c") and
+                            !std.mem.eql(u8, ext, ".h") and
+                            !std.mem.eql(u8, basename, "CMakeLists.txt") //
+                        ) continue;
+                    },
+                }
 
                 try path_list.append(b.pathJoin(&.{ source_path, entry.path }));
             }
@@ -257,59 +296,73 @@ const CmakeBuildStep = struct {
 
         const hit = try step.cacheHit(&man);
         const digest = man.final();
-
         const rel_cache_path = "o".* ++ std.fs.path.sep_str.* ++ digest;
-        const rel_build_path = rel_cache_path ++ std.fs.path.sep_str.* ++ "build".*;
-
-        const build_path = try b.cache_root.join(b.allocator, &.{&rel_build_path});
-        const install_path = if (self.existing_prefix) |existing|
-            existing.getPath2(b, step)
-        else blk: {
-            const install_path = rel_cache_path ++ std.fs.path.sep_str.* ++ "install".*;
-            try b.cache_root.handle.makePath(&install_path);
-            break :blk try b.cache_root.join(b.allocator, &.{&install_path});
-        };
-
-        self.generated_prefix.path = install_path;
+        const install_dir_path = try b.cache_root.join(b.allocator, &.{ &rel_cache_path, "install" });
+        self.generated_install.path = install_dir_path;
         if (hit) return;
 
-        var argv = try std.ArrayList([]const u8).initCapacity(b.allocator, 32);
-        defer argv.deinit();
+        const rel_build_path_base = rel_cache_path ++ std.fs.path.sep_str.* ++ "build".*;
 
-        { // configure
-            argv.clearRetainingCapacity();
-            try argv.append(self.cmake_exe);
-            try argv.appendSlice(&.{ "-S", source_path });
-            try argv.appendSlice(&.{ "-B", build_path });
-            try argv.append(b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_path}));
-            try argv.append(b.fmt("-DCMAKE_PREFIX_PATH={s}", .{install_path}));
+        var argv_buf = std.ArrayList([]const u8).init(b.allocator);
+        defer argv_buf.deinit();
 
-            var config_cp = std.ChildProcess.init(argv.items, b.allocator);
-            config_cp.stdout_behavior = .Inherit;
-            config_cp.stderr_behavior = .Inherit;
-            try switch (try config_cp.spawnAndWait()) {
-                .Exited => |exit_code| if (exit_code != 0) error.CmakeConfigNonZeroExit,
-                .Signal => error.CmakeConfigSignalled,
-                .Stopped => error.CmakeConfigStopped,
-                .Unknown => error.CmakeConfigHaltedForUnknownReason,
-            };
-        }
+        inline for (@typeInfo(DepId).Enum.fields) |field| skip: {
+            const dep_id: DepId = @field(DepId, field.name);
+            if (self.mustSkip(dep_id)) break :skip;
 
-        { // install
-            argv.clearRetainingCapacity();
-            try argv.append(self.cmake_exe);
-            try argv.appendSlice(&.{ "--build", build_path });
-            try argv.appendSlice(&.{ "--target", "install" });
+            const source_path = Build.LazyPath.getPath2(@field(self.source_dirs, field.name), b, step);
+            const build_path: []const u8 = try b.cache_root.join(b.allocator, &.{ &rel_build_path_base, field.name });
 
-            var install_cp = std.ChildProcess.init(argv.items, b.allocator);
-            install_cp.stdout_behavior = .Inherit;
-            install_cp.stderr_behavior = .Inherit;
-            try switch (try install_cp.spawnAndWait()) {
-                .Exited => |exit_code| if (exit_code != 0) error.CmakeInstallNonZeroExit,
-                .Signal => error.CmakeInstallSignalled,
-                .Stopped => error.CmakeInstallStopped,
-                .Unknown => error.CmakeInstallHaltedForUnknownReason,
-            };
+            { // configure
+                argv_buf.clearRetainingCapacity();
+
+                try argv_buf.append(self.cmake_exe);
+                try argv_buf.appendSlice(&.{ "-S", source_path });
+                try argv_buf.appendSlice(&.{ "-B", build_path });
+                try argv_buf.appendSlice(&.{ "-G", "Ninja" });
+
+                try argv_buf.append(b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_dir_path}));
+                try argv_buf.append(b.fmt("-DCMAKE_PREFIX_PATH={s}", .{install_dir_path}));
+
+                try argv_buf.append("-DBUILD_TESTING=" ++ "OFF");
+
+                switch (dep_id) {
+                    .lc => {
+                        try argv_buf.append("-DDISABLE_GO=" ++ "ON");
+                        try argv_buf.append("-DDISABLE_PERL=" ++ "ON");
+                        try argv_buf.append("-DBUILD_TOOL=" ++ "OFF"); // TODO: I assume this disables outputting the executables
+                    },
+                    .s2n_tls => {
+                        try argv_buf.append("-DSEARCH_LIBCRYPTO=" ++ "OFF"); // TODO: no idea what this does but doesn't break anything
+                    },
+
+                    .c_common => {},
+                    .checksums => {},
+                    .c_cal => {},
+                    .c_io => {},
+                    .c_compression => {},
+                    .c_http => {},
+                    .c_sdkutils => {},
+                    .c_auth => {},
+                    .c_s3 => {},
+                }
+
+                try Build.Step.handleVerbose(b, null, argv_buf.items);
+                var config_cp = std.ChildProcess.init(argv_buf.items, b.allocator);
+                try Build.Step.handleChildProcessTerm(step, try config_cp.spawnAndWait(), null, argv_buf.items);
+            }
+
+            { // install
+                argv_buf.clearRetainingCapacity();
+
+                try argv_buf.append(self.cmake_exe);
+                try argv_buf.appendSlice(&.{ "--build", build_path });
+                try argv_buf.appendSlice(&.{ "--target", "install" });
+
+                try Build.Step.handleVerbose(b, null, argv_buf.items);
+                var install_cp = std.ChildProcess.init(argv_buf.items, b.allocator);
+                try Build.Step.handleChildProcessTerm(step, try install_cp.spawnAndWait(), null, argv_buf.items);
+            }
         }
 
         try man.writeManifest();
